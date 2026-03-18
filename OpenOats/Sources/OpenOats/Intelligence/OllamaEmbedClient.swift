@@ -16,7 +16,7 @@ actor OllamaEmbedClient {
         }
     }
 
-    func embed(texts: [String], baseURL: String, model: String) async throws -> [[Float]] {
+    func embed(texts: [String], baseURL: String, model: String, apiKey: String? = nil) async throws -> [[Float]] {
         guard let url = URL(string: baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/v1/embeddings") else {
             throw OllamaEmbedError.invalidURL
         }
@@ -26,6 +26,9 @@ actor OllamaEmbedClient {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let apiKey, !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         request.httpBody = try JSONEncoder().encode(body)
 
         let (data, response) = try await URLSession.shared.data(for: request)

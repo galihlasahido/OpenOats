@@ -21,6 +21,7 @@ enum LLMProvider: String, CaseIterable, Identifiable {
 enum EmbeddingProvider: String, CaseIterable, Identifiable {
     case voyageAI
     case ollama
+    case openAICompatible
 
     var id: String { rawValue }
 
@@ -28,6 +29,7 @@ enum EmbeddingProvider: String, CaseIterable, Identifiable {
         switch self {
         case .voyageAI: "Voyage AI"
         case .ollama: "Ollama"
+        case .openAICompatible: "OpenAI Compatible"
         }
     }
 }
@@ -84,6 +86,18 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(ollamaEmbedModel, forKey: "ollamaEmbedModel") }
     }
 
+    var openAIEmbedBaseURL: String {
+        didSet { UserDefaults.standard.set(openAIEmbedBaseURL, forKey: "openAIEmbedBaseURL") }
+    }
+
+    var openAIEmbedApiKey: String {
+        didSet { KeychainHelper.save(key: "openAIEmbedApiKey", value: openAIEmbedApiKey) }
+    }
+
+    var openAIEmbedModel: String {
+        didSet { UserDefaults.standard.set(openAIEmbedModel, forKey: "openAIEmbedModel") }
+    }
+
     /// Whether the user has acknowledged their obligation to comply with recording consent laws.
     var hasAcknowledgedRecordingConsent: Bool {
         didSet { UserDefaults.standard.set(hasAcknowledgedRecordingConsent, forKey: "hasAcknowledgedRecordingConsent") }
@@ -119,6 +133,9 @@ final class AppSettings {
         self.ollamaBaseURL = defaults.string(forKey: "ollamaBaseURL") ?? "http://localhost:11434"
         self.ollamaLLMModel = defaults.string(forKey: "ollamaLLMModel") ?? "qwen3:8b"
         self.ollamaEmbedModel = defaults.string(forKey: "ollamaEmbedModel") ?? "nomic-embed-text"
+        self.openAIEmbedBaseURL = defaults.string(forKey: "openAIEmbedBaseURL") ?? "http://localhost:8080"
+        self.openAIEmbedApiKey = KeychainHelper.load(key: "openAIEmbedApiKey") ?? ""
+        self.openAIEmbedModel = defaults.string(forKey: "openAIEmbedModel") ?? "text-embedding-3-small"
         self.hasAcknowledgedRecordingConsent = defaults.bool(forKey: "hasAcknowledgedRecordingConsent")
 
         // Default to true (hidden) if key has never been set

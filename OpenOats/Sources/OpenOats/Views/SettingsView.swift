@@ -91,10 +91,11 @@ struct SettingsView: View {
                 }
                 .font(.system(size: 12))
 
-                if settings.embeddingProvider == .voyageAI {
+                switch settings.embeddingProvider {
+                case .voyageAI:
                     SecureField("API Key", text: $settings.voyageApiKey)
                         .font(.system(size: 12, design: .monospaced))
-                } else {
+                case .ollama:
                     TextField("Embedding Model", text: $settings.ollamaEmbedModel, prompt: Text("e.g. nomic-embed-text"))
                         .font(.system(size: 12, design: .monospaced))
 
@@ -102,6 +103,15 @@ struct SettingsView: View {
                         TextField("Ollama URL", text: $settings.ollamaBaseURL, prompt: Text("http://localhost:11434"))
                             .font(.system(size: 12, design: .monospaced))
                     }
+                case .openAICompatible:
+                    TextField("Endpoint URL", text: $settings.openAIEmbedBaseURL, prompt: Text("http://localhost:8080"))
+                        .font(.system(size: 12, design: .monospaced))
+
+                    SecureField("API Key (optional)", text: $settings.openAIEmbedApiKey)
+                        .font(.system(size: 12, design: .monospaced))
+
+                    TextField("Model", text: $settings.openAIEmbedModel, prompt: Text("e.g. text-embedding-3-small"))
+                        .font(.system(size: 12, design: .monospaced))
                 }
             }
 

@@ -13,6 +13,8 @@ struct KBChunk: Codable, Sendable {
 private struct KBCache: Codable {
     /// Keyed by "filename:sha256hash"
     var entries: [String: [KBChunk]]
+    /// Fingerprint of the embedding config used to produce these vectors.
+    var embeddingConfigFingerprint: String?
 }
 
 /// Embedding-based knowledge base search using Voyage AI or Ollama.
@@ -27,9 +29,6 @@ final class KnowledgeBase {
     private let settings: AppSettings
     private let voyageClient = VoyageClient()
     private let ollamaEmbedClient = OllamaEmbedClient()
-
-    /// Tracks which embedding provider was used for the cached embeddings.
-    private var lastEmbeddingProvider: EmbeddingProvider?
 
     private nonisolated static func cacheURL() -> URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -53,12 +52,6 @@ final class KnowledgeBase {
             }
         }
 
-        // Invalidate cache if embedding provider changed
-        if let lastProvider = lastEmbeddingProvider, lastProvider != provider {
-            clearCache()
-        }
-        lastEmbeddingProvider = provider
-
         indexingProgress = "Scanning files..."
         let fileURLs = collectFiles(in: folderURL)
         guard !fileURLs.isEmpty else {
@@ -67,8 +60,12 @@ final class KnowledgeBase {
             return
         }
 
-        // Load existing cache
+        // Load existing cache; invalidate if embedding config changed
+        let fingerprint = embeddingConfigFingerprint()
         var cache = loadCache()
+        if cache.embeddingConfigFingerprint != fingerprint {
+            cache = KBCache(entries: [:], embeddingConfigFingerprint: fingerprint)
+        }
         var allChunks: [KBChunk] = []
         var filesToEmbed: [(key: String, chunks: [(text: String, header: String)])] = []
         var files = 0
@@ -396,6 +393,21 @@ final class KnowledgeBase {
         return result
     }
 
+    // MARK: - Embedding Config Fingerprint
+
+    /// Returns a string that uniquely identifies the current embedding configuration.
+    /// Any change (provider, model, URL) produces a different fingerprint, invalidating the cache.
+    private func embeddingConfigFingerprint() -> String {
+        switch settings.embeddingProvider {
+        case .voyageAI:
+            return "voyageAI"
+        case .ollama:
+            return "ollama|\(settings.ollamaBaseURL)|\(settings.ollamaEmbedModel)"
+        case .openAICompatible:
+            return "openAI|\(settings.openAIEmbedBaseURL)|\(settings.openAIEmbedModel)"
+        }
+    }
+
     // MARK: - Embedding Dispatch
 
     /// Embeds texts using the currently configured provider.
@@ -412,6 +424,13 @@ final class KnowledgeBase {
                 texts: texts,
                 baseURL: settings.ollamaBaseURL,
                 model: settings.ollamaEmbedModel
+            )
+        case .openAICompatible:
+            return try await ollamaEmbedClient.embed(
+                texts: texts,
+                baseURL: settings.openAIEmbedBaseURL,
+                model: settings.openAIEmbedModel,
+                apiKey: settings.openAIEmbedApiKey
             )
         }
     }
