@@ -1,16 +1,21 @@
 import Foundation
 
-/// Auto-saves transcripts as plain text files to ~/Documents/OpenOats/
+/// Auto-saves transcripts as plain text files to a configurable folder.
 actor TranscriptLogger {
-    private let directory: URL
+    private var directory: URL
     private var currentFile: URL?
     private var fileHandle: FileHandle?
     private var sessionHeader: String = ""
 
-    init() {
-        directory = FileManager.default.homeDirectoryForCurrentUser
+    init(directory: URL? = nil) {
+        self.directory = directory ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Documents/OpenOats", isDirectory: true)
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: self.directory, withIntermediateDirectories: true)
+    }
+
+    func updateDirectory(_ url: URL) {
+        self.directory = url
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     }
 
     func startSession() {

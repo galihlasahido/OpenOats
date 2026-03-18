@@ -14,13 +14,32 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("Knowledge Base") {
-                Text("Point this to a folder of notes, docs, or reference material (.md, .txt). During meetings, OpenOats searches this folder to surface relevant context and talking points.")
+            Section("Meeting Notes") {
+                Text("Where meeting transcripts are saved as plain text files.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
 
                 HStack {
-                    Text(settings.kbFolderPath.isEmpty ? "No folder selected" : settings.kbFolderPath)
+                    Text(settings.notesFolderPath)
+                        .font(.system(size: 12))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    Spacer()
+
+                    Button("Choose...") {
+                        chooseNotesFolder()
+                    }
+                }
+            }
+
+            Section("Knowledge Base") {
+                Text("Optional. Point this to a folder of notes, docs, or reference material (.md, .txt). During meetings, OpenOats searches this folder to surface relevant context and talking points.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                HStack {
+                    Text(settings.kbFolderPath.isEmpty ? "Not set" : settings.kbFolderPath)
                         .font(.system(size: 12))
                         .foregroundStyle(settings.kbFolderPath.isEmpty ? .tertiary : .primary)
                         .lineLimit(1)
@@ -28,8 +47,15 @@ struct SettingsView: View {
 
                     Spacer()
 
+                    if !settings.kbFolderPath.isEmpty {
+                        Button("Clear") {
+                            settings.kbFolderPath = ""
+                        }
+                        .font(.system(size: 12))
+                    }
+
                     Button("Choose...") {
-                        chooseFolder()
+                        chooseKBFolder()
                     }
                 }
             }
@@ -197,7 +223,7 @@ struct SettingsView: View {
         }
     }
 
-    private func chooseFolder() {
+    private func chooseKBFolder() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -206,6 +232,18 @@ struct SettingsView: View {
 
         if panel.runModal() == .OK, let url = panel.url {
             settings.kbFolderPath = url.path
+        }
+    }
+
+    private func chooseNotesFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose where to save meeting transcripts"
+
+        if panel.runModal() == .OK, let url = panel.url {
+            settings.notesFolderPath = url.path
         }
     }
 }

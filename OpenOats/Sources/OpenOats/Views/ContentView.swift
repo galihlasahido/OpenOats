@@ -9,7 +9,7 @@ struct ContentView: View {
     @State private var knowledgeBase: KnowledgeBase?
     @State private var transcriptionEngine: TranscriptionEngine?
     @State private var suggestionEngine: SuggestionEngine?
-    @State private var transcriptLogger = TranscriptLogger()
+    @State private var transcriptLogger: TranscriptLogger?
     @State private var overlayManager = OverlayManager()
     @AppStorage("isTranscriptExpanded") private var isTranscriptExpanded = true
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
@@ -145,11 +145,25 @@ struct ContentView: View {
                     knowledgeBase: kb,
                     settings: settings
                 )
+                transcriptLogger = TranscriptLogger(
+                    directory: URL(fileURLWithPath: settings.notesFolderPath)
+                )
             }
             indexKBIfNeeded()
         }
         .onChange(of: settings.kbFolderPath) {
-            indexKBIfNeeded()
+            if settings.kbFolderPath.isEmpty {
+                knowledgeBase?.clear()
+            } else {
+                indexKBIfNeeded()
+            }
+        }
+        .onChange(of: settings.notesFolderPath) {
+            Task {
+                await transcriptLogger?.updateDirectory(
+                    URL(fileURLWithPath: settings.notesFolderPath)
+                )
+            }
         }
         .onChange(of: settings.voyageApiKey) {
             indexKBIfNeeded()
@@ -320,7 +334,7 @@ struct ContentView: View {
         Task {
             suggestionEngine?.clear()
             await coordinator.startSession(transcriptStore: transcriptStore)
-            await transcriptLogger.startSession()
+            await transcriptLogger?.startSession()
             await transcriptionEngine?.start(
                 locale: settings.locale,
                 inputDeviceID: settings.inputDeviceID
@@ -383,7 +397,7 @@ struct ContentView: View {
 
         // Persist to transcript log
         Task {
-            await transcriptLogger.append(
+            await transcriptLogger?.append(
                 speaker: last.speaker == .you ? "You" : "Them",
                 text: last.text,
                 timestamp: last.timestamp

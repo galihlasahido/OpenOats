@@ -39,6 +39,10 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(kbFolderPath, forKey: "kbFolderPath") }
     }
 
+    var notesFolderPath: String {
+        didSet { UserDefaults.standard.set(notesFolderPath, forKey: "notesFolderPath") }
+    }
+
     var selectedModel: String {
         didSet { UserDefaults.standard.set(selectedModel, forKey: "selectedModel") }
     }
@@ -100,9 +104,11 @@ final class AppSettings {
         Self.migrateFromOldBundleIfNeeded(defaults: defaults)
         Self.migrateFromOpenGranolaIfNeeded(defaults: defaults)
 
-        let defaultKBPath = FileManager.default.homeDirectoryForCurrentUser
+        self.kbFolderPath = defaults.string(forKey: "kbFolderPath") ?? ""
+
+        let defaultNotesPath = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Documents/OpenOats").path
-        self.kbFolderPath = defaults.string(forKey: "kbFolderPath") ?? defaultKBPath
+        self.notesFolderPath = defaults.string(forKey: "notesFolderPath") ?? defaultNotesPath
         self.selectedModel = defaults.string(forKey: "selectedModel") ?? "google/gemini-3-flash-preview"
         self.transcriptionLocale = defaults.string(forKey: "transcriptionLocale") ?? "en-US"
         self.inputDeviceID = AudioDeviceID(defaults.integer(forKey: "inputDeviceID"))
@@ -122,13 +128,11 @@ final class AppSettings {
             self.hideFromScreenShare = defaults.bool(forKey: "hideFromScreenShare")
         }
 
-        // Ensure default KB folder exists
-        if defaults.string(forKey: "kbFolderPath") == nil {
-            try? FileManager.default.createDirectory(
-                atPath: kbFolderPath,
-                withIntermediateDirectories: true
-            )
-        }
+        // Ensure notes folder exists
+        try? FileManager.default.createDirectory(
+            atPath: notesFolderPath,
+            withIntermediateDirectories: true
+        )
     }
 
     /// Migrate settings from the old "On The Spot" (com.onthespot.app) bundle.
@@ -241,32 +245,28 @@ final class AppSettings {
             }
         }
 
-        // Handle implicit KB folder default: if kbFolderPath was never explicitly
-        // set, users were using ~/Documents/OpenGranola as the implicit default.
-        // That path won't be in UserDefaults, so migrate it to the new default.
+        // KB folder: leave unset by default. Only preserve an explicitly-set path
+        // that pointed at the old OpenGranola directory (user chose it themselves).
         let oldDocDir = home.appendingPathComponent("Documents/OpenGranola")
         let newDocDir = home.appendingPathComponent("Documents/OpenOats")
-        if defaults.string(forKey: "kbFolderPath") == nil {
-            // Check if the old default directory exists and has content
+
+        // Migrate notes folder: if the old default directory has content,
+        // use it as the notes folder so transcript archives stay accessible.
+        if defaults.string(forKey: "notesFolderPath") == nil {
             if fm.fileExists(atPath: oldDocDir.path) {
                 let contents = (try? fm.contentsOfDirectory(atPath: oldDocDir.path)) ?? []
                 if !contents.isEmpty {
-                    // Point KB at the existing old directory rather than
-                    // creating a new empty one — preserves user's files in place
-                    defaults.set(oldDocDir.path, forKey: "kbFolderPath")
+                    defaults.set(oldDocDir.path, forKey: "notesFolderPath")
                 }
             }
-        } else if defaults.string(forKey: "kbFolderPath") == oldDocDir.path {
-            // User explicitly had the old default path saved — keep it pointing
-            // at the existing directory so their files stay accessible
-            // (no change needed, the path is already persisted)
         }
 
         // Migrate transcript archives: move files from ~/Documents/OpenGranola/
-        // into ~/Documents/OpenOats/ so new sessions and old archives coexist
-        if fm.fileExists(atPath: oldDocDir.path) && oldDocDir.path != (defaults.string(forKey: "kbFolderPath") ?? "") {
-            // Only move transcript .txt files if the old dir isn't the active KB folder
-            // (if it IS the KB folder, leave everything in place)
+        // into ~/Documents/OpenOats/ so new sessions and old archives coexist.
+        // Skip if the old dir is the active KB folder or notes folder (files stay in place).
+        let activeKB = defaults.string(forKey: "kbFolderPath") ?? ""
+        let activeNotes = defaults.string(forKey: "notesFolderPath") ?? ""
+        if fm.fileExists(atPath: oldDocDir.path) && oldDocDir.path != activeKB && oldDocDir.path != activeNotes {
             try? fm.createDirectory(at: newDocDir, withIntermediateDirectories: true)
             if let files = try? fm.contentsOfDirectory(at: oldDocDir, includingPropertiesForKeys: nil) {
                 for file in files where file.pathExtension == "txt" {
