@@ -137,6 +137,10 @@ actor TranscriptRefinementEngine {
             }
             baseURL = url
             model = openAILLMModelName
+        case .claudeCLI:
+            apiKey = nil
+            baseURL = nil
+            model = "claude-cli"
         }
 
         let messages: [OpenRouterClient.Message] = [

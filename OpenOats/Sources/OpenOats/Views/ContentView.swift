@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 import CoreAudio
 
@@ -211,6 +212,7 @@ struct ContentView: View {
                 statusMessage: viewState.statusMessage,
                 errorMessage: viewState.errorMessage,
                 needsDownload: viewState.needsDownload,
+                recordOnly: settings.recordOnly,
                 onToggle: {
                     pendingControlBarAction = .toggle
                 },
@@ -298,6 +300,15 @@ struct ContentView: View {
                 }
             } else {
                 coordinator.teardownMeetingDetection()
+            }
+        }
+        // Poll audio level at 10Hz so the meter animates even when no
+        // observable state changes (e.g. record-only mode).
+        .onReceive(Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()) { _ in
+            guard viewState.isRunning else { return }
+            let level = coordinator.transcriptionEngine?.audioLevel ?? 0
+            if abs(level - audioLevel) > 0.001 {
+                audioLevel = level
             }
         }
     }
@@ -496,10 +507,11 @@ struct ContentView: View {
         case .ollama: settings.ollamaLLMModel
         case .mlx: settings.mlxModel
         case .openAICompatible: settings.openAILLMModel
+        case .claudeCLI: "Claude CLI"
         }
 
         var nextViewState = ViewState()
-        nextViewState.isRunning = coordinator.transcriptionEngine?.isRunning ?? false
+        nextViewState.isRunning = coordinator.isRecording || (coordinator.transcriptionEngine?.isRunning ?? false)
         nextViewState.lastEndedSession = lastEndedSession
         nextViewState.lastSessionHasNotes = lastSessionHasNotes
         nextViewState.modelDisplayName = activeModelRaw.split(separator: "/").last.map(String.init) ?? activeModelRaw

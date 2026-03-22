@@ -1,16 +1,22 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct NotesView: View {
     @Bindable var settings: AppSettings
     @Environment(AppCoordinator.self) private var coordinator
-    @State private var selectedSessionID: String?
+    @State private var selectedSessionIDs: Set<String> = []
     @State private var loadedNotes: EnhancedNotes?
     @State private var loadedTranscript: [SessionRecord] = []
     @State private var selectedTemplateForGeneration: MeetingTemplate?
     @State private var renamingSessionID: String?
     @State private var renameText: String = ""
-    @State private var sessionToDelete: String?
+    @State private var sessionsToDelete: Set<String> = []
     @State private var showDeleteConfirmation = false
+
+    /// Bridge for single-selection behavior — returns the first selected ID.
+    private var selectedSessionID: String? {
+        selectedSessionIDs.count == 1 ? selectedSessionIDs.first : nil
+    }
 
     enum DetailViewMode: String, CaseIterable {
         case transcript = "Transcript"
@@ -19,6 +25,7 @@ struct NotesView: View {
 
     @State private var detailViewMode: DetailViewMode = .transcript
     @State private var showingOriginal = false
+    @State private var importTask: Task<Void, Never>?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -31,23 +38,23 @@ struct NotesView: View {
         .task {
             await coordinator.loadHistory()
             if let requested = coordinator.consumeRequestedSessionSelection() {
-                selectedSessionID = requested
+                selectedSessionIDs = [requested]
                 detailViewMode = .notes
             } else if let last = coordinator.lastEndedSession {
-                selectedSessionID = last.id
+                selectedSessionIDs = [last.id]
             }
         }
         .onChange(of: coordinator.lastEndedSession?.id) {
             if let last = coordinator.lastEndedSession {
                 Task {
                     await coordinator.loadHistory()
-                    selectedSessionID = last.id
+                    selectedSessionIDs = [last.id]
                 }
             }
         }
         .onChange(of: coordinator.requestedSessionSelectionID) {
             if let requested = coordinator.consumeRequestedSessionSelection() {
-                selectedSessionID = requested
+                selectedSessionIDs = [requested]
                 // Deep links target notes, so default to the Notes tab
                 detailViewMode = .notes
             }
@@ -57,7 +64,7 @@ struct NotesView: View {
     // MARK: - Sidebar
 
     private var sidebar: some View {
-        List(coordinator.sessionHistory, selection: $selectedSessionID) { session in
+        List(coordinator.sessionHistory, selection: $selectedSessionIDs) { session in
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
                     if let snap = session.templateSnapshot {
@@ -103,25 +110,85 @@ struct NotesView: View {
                     renameText = session.title ?? ""
                     renamingSessionID = session.id
                 }
+                if let url = recordingURL(for: session.id) {
+                    Button {
+                        NSWorkspace.shared.open(url)
+                    } label: {
+                        Label("Play Recording", systemImage: "play.fill")
+                    }
+                    Button {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    } label: {
+                        Label("Show in Finder", systemImage: "folder")
+                    }
+                    Button {
+                        exportToVoiceMemos(sessionID: session.id)
+                    } label: {
+                        Label("Export to Voice Memos", systemImage: "square.and.arrow.up")
+                    }
+                }
                 Divider()
-                Button("Delete", role: .destructive) {
-                    sessionToDelete = session.id
-                    showDeleteConfirmation = true
+                if selectedSessionIDs.count > 1 {
+                    Button("Delete \(selectedSessionIDs.count) Sessions", role: .destructive) {
+                        sessionsToDelete = selectedSessionIDs
+                        showDeleteConfirmation = true
+                    }
+                } else {
+                    Button("Delete", role: .destructive) {
+                        sessionsToDelete = [session.id]
+                        showDeleteConfirmation = true
+                    }
                 }
             }
         }
         .listStyle(.sidebar)
         .frame(maxHeight: .infinity)
-        .onChange(of: selectedSessionID) {
-            loadSelectedSession()
-        }
-        .alert("Delete Meeting?", isPresented: $showDeleteConfirmation) {
-            Button("Delete", role: .destructive) {
-                if let id = sessionToDelete {
-                    deleteSession(sessionID: id)
+        .safeAreaInset(edge: .bottom) {
+            VStack(spacing: 0) {
+                Divider()
+                if coordinator.isImporting {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text(coordinator.importProgress ?? "Importing...")
+                    }
+                    .font(.system(size: 12))
+                    .padding(.vertical, 8)
+                } else {
+                    Menu {
+                        Button {
+                            importAudioFile()
+                        } label: {
+                            Label("Import Audio File...", systemImage: "doc.badge.plus")
+                        }
+                        Button {
+                            importFromVoiceMemos()
+                        } label: {
+                            Label("Import from Voice Memos...", systemImage: "waveform")
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "square.and.arrow.down")
+                            Text("Import Audio")
+                        }
+                        .font(.system(size: 12))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
                 }
             }
-            Button("Cancel", role: .cancel) {}
+        }
+        .onChange(of: selectedSessionIDs) {
+            loadSelectedSession()
+        }
+        .alert(sessionsToDelete.count > 1 ? "Delete \(sessionsToDelete.count) Meetings?" : "Delete Meeting?", isPresented: $showDeleteConfirmation) {
+            Button("Delete", role: .destructive) {
+                deleteSessions(sessionIDs: sessionsToDelete)
+                sessionsToDelete = []
+            }
+            Button("Cancel", role: .cancel) { sessionsToDelete = [] }
         } message: {
             Text("This will permanently delete the transcript and any generated notes.")
         }
@@ -132,10 +199,25 @@ struct NotesView: View {
     @ViewBuilder
     private var detailContent: some View {
         if let sessionID = selectedSessionID {
-            VStack(spacing: 0) {
-                detailToolbar
-                Divider()
-                detailBody(sessionID: sessionID)
+            ZStack {
+                VStack(spacing: 0) {
+                    detailToolbar
+                    Divider()
+                    detailBody(sessionID: sessionID)
+                }
+
+                // Centered import/transcription progress overlay
+                if coordinator.isImporting {
+                    VStack(spacing: 16) {
+                        ProgressView()
+                            .controlSize(.large)
+                        Text(coordinator.importProgress ?? "Transcribing...")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(.ultraThinMaterial)
+                }
             }
             .background {
                 Group {
@@ -148,6 +230,8 @@ struct NotesView: View {
                 .opacity(0)
                 .accessibilityHidden(true)
             }
+        } else if selectedSessionIDs.count > 1 {
+            ContentUnavailableView("\(selectedSessionIDs.count) Sessions Selected", systemImage: "checkmark.circle", description: Text("Right-click to delete selected sessions."))
         } else {
             ContentUnavailableView("Select a Session", systemImage: "doc.text", description: Text("Choose a session from the sidebar to view or generate notes."))
         }
@@ -206,6 +290,17 @@ struct NotesView: View {
 
     @ViewBuilder
     private var transcriptToolbarActions: some View {
+        if loadedTranscript.isEmpty, let sessionID = selectedSessionID, recordingURL(for: sessionID) != nil, !coordinator.isImporting {
+            Button {
+                transcribeRecording(sessionID: sessionID)
+            } label: {
+                Label("Transcribe Recording", systemImage: "waveform.badge.plus")
+                    .font(.system(size: 12))
+            }
+            .buttonStyle(.borderedProminent)
+            .help("Transcribe the audio recording for this session")
+        }
+
         switch cleanupState {
         case .notCleaned:
             Button {
@@ -616,11 +711,156 @@ struct NotesView: View {
         }
     }
 
+    private func transcribeRecording(sessionID: String) {
+        guard let url = recordingURL(for: sessionID) else { return }
+        importTask = Task {
+            if let newSessionID = await coordinator.importAudioFile(url: url, settings: settings) {
+                // Delete the empty original session since we created a new one with the transcript
+                await coordinator.sessionStore.deleteSession(sessionID: sessionID)
+                await coordinator.loadHistory()
+                selectedSessionIDs = [newSessionID]
+                loadSelectedSession()
+            }
+        }
+    }
+
+    private func importAudioFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.audio, .mpeg4Audio, .wav, .mp3, .aiff]
+        panel.message = "Select an audio file to transcribe"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        importTask = Task {
+            if let sessionID = await coordinator.importAudioFile(url: url, settings: settings) {
+                selectedSessionIDs = [sessionID]
+                loadSelectedSession()
+            }
+        }
+    }
+
+    private func importFromVoiceMemos() {
+        let voiceMemosDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Group Containers/group.com.apple.VoiceMemos.shared/Recordings")
+
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.audio, .mpeg4Audio]
+        panel.message = "Select a Voice Memo to transcribe"
+        if FileManager.default.fileExists(atPath: voiceMemosDir.path) {
+            panel.directoryURL = voiceMemosDir
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        importTask = Task {
+            if let sessionID = await coordinator.importAudioFile(url: url, settings: settings) {
+                selectedSessionIDs = [sessionID]
+                loadSelectedSession()
+            }
+        }
+    }
+
+    private func exportToVoiceMemos(sessionID: String) {
+        guard let sourceURL = recordingURL(for: sessionID) else { return }
+
+        let voiceMemosDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Group Containers/group.com.apple.VoiceMemos.shared/Recordings")
+
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: voiceMemosDir.path) else {
+            coordinator.lastStorageError = "Voice Memos folder not found. Make sure Voice Memos is installed."
+            return
+        }
+
+        // Use the session title or timestamp as the filename
+        let session = coordinator.sessionHistory.first { $0.id == sessionID }
+        let name = session?.title ?? sessionID
+        let destURL = voiceMemosDir.appendingPathComponent("\(name).m4a")
+
+        do {
+            if fm.fileExists(atPath: destURL.path) {
+                try fm.removeItem(at: destURL)
+            }
+            try fm.copyItem(at: sourceURL, to: destURL)
+        } catch {
+            coordinator.lastStorageError = "Export failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func recordingURL(for sessionID: String) -> URL? {
+        // Session ID: "session_2026-03-22_07-15-30" → recording: "2026-03-22_07-15.m4a"
+        // The session and recording timestamps may differ by up to a minute,
+        // so we search for the closest matching .m4a file.
+        let stripped = sessionID.replacingOccurrences(of: "session_", with: "")
+        let parts = stripped.split(separator: "-")
+        guard parts.count >= 4 else { return nil }
+        // Date-hour prefix for narrowing: "2026-03-22_07"
+        let datePrefix = parts.prefix(3).joined(separator: "-")
+
+        let notesDir = URL(fileURLWithPath: settings.notesFolderPath)
+        let fm = FileManager.default
+
+        // Try exact match first (drop seconds)
+        if parts.count == 5 {
+            let exact = parts.dropLast().joined(separator: "-")
+            let exactURL = notesDir.appendingPathComponent("\(exact).m4a")
+            if fm.fileExists(atPath: exactURL.path) { return exactURL }
+        }
+
+        // Search for closest matching .m4a with same date-hour prefix
+        guard let files = try? fm.contentsOfDirectory(atPath: notesDir.path) else { return nil }
+        let candidates = files.filter { $0.hasSuffix(".m4a") && $0.hasPrefix(datePrefix) }
+        guard !candidates.isEmpty else { return nil }
+
+        if candidates.count == 1 {
+            return notesDir.appendingPathComponent(candidates[0])
+        }
+
+        // Multiple candidates in the same hour — find closest by minute
+        if parts.count >= 5, let sessionMinute = Int(parts[3]) {
+            var bestMatch: String?
+            var bestDiff = Int.max
+            for candidate in candidates {
+                let name = candidate.replacingOccurrences(of: ".m4a", with: "")
+                let cParts = name.split(separator: "-")
+                if cParts.count >= 4, let candidateMinute = Int(cParts[3]) {
+                    let diff = abs(candidateMinute - sessionMinute)
+                    if diff < bestDiff {
+                        bestDiff = diff
+                        bestMatch = candidate
+                    }
+                }
+            }
+            if let bestMatch, bestDiff <= 1 {
+                return notesDir.appendingPathComponent(bestMatch)
+            }
+        }
+
+        return notesDir.appendingPathComponent(candidates[0])
+    }
+
     private func deleteSession(sessionID: String) {
+        deleteSessions(sessionIDs: [sessionID])
+    }
+
+    private func deleteSessions(sessionIDs: Set<String>) {
         Task {
-            await coordinator.sessionStore.deleteSession(sessionID: sessionID)
-            if selectedSessionID == sessionID {
-                selectedSessionID = nil
+            for id in sessionIDs {
+                // Delete recording (.m4a) and transcript (.txt) files alongside the session
+                if let recordingFile = recordingURL(for: id) {
+                    try? FileManager.default.removeItem(at: recordingFile)
+                    // Also delete matching .txt transcript
+                    let txtFile = recordingFile.deletingPathExtension().appendingPathExtension("txt")
+                    try? FileManager.default.removeItem(at: txtFile)
+                }
+                await coordinator.sessionStore.deleteSession(sessionID: id)
+            }
+            if !selectedSessionIDs.isDisjoint(with: sessionIDs) {
+                selectedSessionIDs.subtract(sessionIDs)
                 loadedNotes = nil
                 loadedTranscript = []
             }

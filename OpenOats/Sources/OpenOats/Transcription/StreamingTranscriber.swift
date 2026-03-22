@@ -13,6 +13,13 @@ final class StreamingTranscriber: @unchecked Sendable {
     private let onFinal: @Sendable (String) -> Void
     private let log = Logger(subsystem: "com.openoats", category: "StreamingTranscriber")
 
+    /// Optional echo gate: provides the current audio level of the other side.
+    /// When set, mic speech segments are suppressed if the other side is actively
+    /// playing audio (i.e. the mic is picking up speaker echo, not the user's voice).
+    private let echoGateLevel: AudioLevel?
+    /// System audio level above this threshold means the other side is speaking.
+    private static let echoGateThreshold: Float = 0.02
+
     /// Resampler from source format to 16kHz mono Float32.
     private var converter: AVAudioConverter?
     private let targetFormat = AVAudioFormat(
@@ -22,11 +29,16 @@ final class StreamingTranscriber: @unchecked Sendable {
         interleaved: false
     )!
 
+    /// Cap concurrent transcription tasks to avoid unbounded memory growth
+    /// when audio segments arrive faster than the model can transcribe.
+    private static let maxConcurrentTranscriptions = 3
+
     init(
         backend: any TranscriptionBackend,
         locale: Locale,
         vadManager: VadManager,
         speaker: Speaker,
+        echoGateLevel: AudioLevel? = nil,
         onPartial: @escaping @Sendable (String) -> Void,
         onFinal: @escaping @Sendable (String) -> Void
     ) {
@@ -34,6 +46,7 @@ final class StreamingTranscriber: @unchecked Sendable {
         self.locale = locale
         self.vadManager = vadManager
         self.speaker = speaker
+        self.echoGateLevel = echoGateLevel
         self.onPartial = onPartial
         self.onFinal = onFinal
     }
@@ -53,6 +66,13 @@ final class StreamingTranscriber: @unchecked Sendable {
         var recentChunks: [[Float]] = []
         var isSpeaking = false
         var bufferCount = 0
+
+        // Echo gate: count how many VAD chunks had high system audio during this speech segment
+        var echoActiveChunks = 0
+        var totalSpeechChunks = 0
+
+        // Track in-flight transcription tasks so we don't spawn unboundedly
+        var inFlightTasks: [Task<Void, Never>] = []
 
         for await buffer in stream {
             bufferCount += 1
@@ -105,6 +125,14 @@ final class StreamingTranscriber: @unchecked Sendable {
                     if wasSpeaking || startedSpeech || endedSpeech {
                         speechSamples.append(contentsOf: chunk)
                         recentChunks.removeAll(keepingCapacity: true)
+
+                        // Sample the echo gate during speech
+                        if let echoLevel = echoGateLevel {
+                            totalSpeechChunks += 1
+                            if echoLevel.value >= Self.echoGateThreshold {
+                                echoActiveChunks += 1
+                            }
+                        }
                     } else {
                         recentChunks.append(chunk)
                         if recentChunks.count > Self.prerollChunkCount {
@@ -115,10 +143,30 @@ final class StreamingTranscriber: @unchecked Sendable {
                     if endedSpeech {
                         isSpeaking = false
                         diagLog("[\(self.speaker.rawValue)] speech end, samples=\(speechSamples.count)")
-                        if speechSamples.count > Self.minimumSpeechSamples {
+
+                        // Echo gate: if more than half the speech overlapped with
+                        // active system audio, it's likely speaker echo — discard it.
+                        let isEcho = totalSpeechChunks > 0
+                            && Double(echoActiveChunks) / Double(totalSpeechChunks) > 0.5
+                        echoActiveChunks = 0
+                        totalSpeechChunks = 0
+
+                        if isEcho {
+                            diagLog("[\(self.speaker.rawValue)] echo gate: suppressed segment (echo ratio \(echoActiveChunks)/\(totalSpeechChunks))")
+                            speechSamples.removeAll(keepingCapacity: true)
+                        } else if speechSamples.count > Self.minimumSpeechSamples {
                             let segment = speechSamples
                             speechSamples.removeAll(keepingCapacity: true)
-                            await transcribeSegment(segment)
+                            // Prune completed tasks
+                            inFlightTasks.removeAll { $0.isCancelled }
+                            // If at capacity, wait for the oldest task to finish
+                            if inFlightTasks.count >= Self.maxConcurrentTranscriptions {
+                                await inFlightTasks.removeFirst().value
+                            }
+                            let task = Task { [self] in
+                                await self.transcribeSegment(segment)
+                            }
+                            inFlightTasks.append(task)
                         } else {
                             speechSamples.removeAll(keepingCapacity: true)
                         }
@@ -126,9 +174,27 @@ final class StreamingTranscriber: @unchecked Sendable {
 
                         // Flush every ~3s for near-real-time output during continuous speech
                         if speechSamples.count >= Self.flushInterval {
-                            let segment = speechSamples
-                            speechSamples.removeAll(keepingCapacity: true)
-                            await transcribeSegment(segment)
+                            // Check echo gate on flush too
+                            let isEcho = totalSpeechChunks > 0
+                                && Double(echoActiveChunks) / Double(totalSpeechChunks) > 0.5
+
+                            if isEcho {
+                                diagLog("[\(self.speaker.rawValue)] echo gate: suppressed flush segment")
+                                speechSamples.removeAll(keepingCapacity: true)
+                            } else {
+                                let segment = speechSamples
+                                speechSamples.removeAll(keepingCapacity: true)
+                                inFlightTasks.removeAll { $0.isCancelled }
+                                if inFlightTasks.count >= Self.maxConcurrentTranscriptions {
+                                    await inFlightTasks.removeFirst().value
+                                }
+                                let task = Task { [self] in
+                                    await self.transcribeSegment(segment)
+                                }
+                                inFlightTasks.append(task)
+                            }
+                            echoActiveChunks = 0
+                            totalSpeechChunks = 0
                         }
                     }
                 } catch {
@@ -137,8 +203,17 @@ final class StreamingTranscriber: @unchecked Sendable {
             }
         }
 
+        // Transcribe any remaining speech
         if speechSamples.count > Self.minimumSpeechSamples {
-            await transcribeSegment(speechSamples)
+            let task = Task { [self] in
+                await self.transcribeSegment(speechSamples)
+            }
+            inFlightTasks.append(task)
+        }
+
+        // Wait for all in-flight transcriptions to complete before exiting
+        for task in inFlightTasks {
+            await task.value
         }
     }
 

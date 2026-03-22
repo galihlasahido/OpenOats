@@ -9,6 +9,7 @@ enum LLMProvider: String, CaseIterable, Identifiable {
     case ollama
     case mlx
     case openAICompatible
+    case claudeCLI
 
     var id: String { rawValue }
 
@@ -18,6 +19,7 @@ enum LLMProvider: String, CaseIterable, Identifiable {
         case .ollama: "Ollama"
         case .mlx: "MLX"
         case .openAICompatible: "OpenAI Compatible"
+        case .claudeCLI: "Claude CLI"
         }
     }
 }
@@ -28,6 +30,7 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
     case qwen3ASR06B
     case whisperBase
     case whisperSmall
+    case whisperLocal
 
     var id: String { rawValue }
 
@@ -38,6 +41,7 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
         case .qwen3ASR06B: "Qwen3 ASR 0.6B"
         case .whisperBase: "Whisper Base"
         case .whisperSmall: "Whisper Small"
+        case .whisperLocal: "Whisper Local Model"
         }
     }
 
@@ -51,12 +55,14 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
             "Whisper Base requires a one-time model download (~142 MB)."
         case .whisperSmall:
             "Whisper Small requires a one-time model download (~244 MB)."
+        case .whisperLocal:
+            "Please select a folder containing WhisperKit CoreML model files."
         }
     }
 
     var supportsExplicitLanguageHint: Bool {
         switch self {
-        case .qwen3ASR06B:
+        case .qwen3ASR06B, .whisperLocal:
             true
         case .parakeetV2, .parakeetV3, .whisperBase, .whisperSmall:
             false
@@ -67,6 +73,8 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
         switch self {
         case .qwen3ASR06B:
             "Language Hint"
+        case .whisperLocal:
+            "Language"
         case .parakeetV2, .parakeetV3, .whisperBase, .whisperSmall:
             "Locale"
         }
@@ -82,6 +90,8 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
             "Optional. Used as a language hint for Qwen3 ASR. Enter a locale such as en-US, fr-FR, or ja-JP. Applies when a new session starts."
         case .whisperBase, .whisperSmall:
             "Whisper auto-detects the spoken language. Locale changes do not affect this model."
+        case .whisperLocal:
+            "Optional. Whisper language code (e.g. id, en, ja, fr). Leave empty for auto-detect."
         }
     }
 
@@ -94,13 +104,14 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
         }
     }
 
-    func makeBackend(customVocabulary: String = "") -> any TranscriptionBackend {
+    func makeBackend(customVocabulary: String = "", localModelPath: String = "") -> any TranscriptionBackend {
         switch self {
         case .parakeetV2: return ParakeetBackend(version: .v2, customVocabulary: customVocabulary)
         case .parakeetV3: return ParakeetBackend(version: .v3, customVocabulary: customVocabulary)
         case .qwen3ASR06B: return Qwen3Backend()
         case .whisperBase: return WhisperKitBackend(variant: .base)
         case .whisperSmall: return WhisperKitBackend(variant: .small)
+        case .whisperLocal: return WhisperKitLocalBackend(modelFolder: localModelPath)
         }
     }
 }
@@ -234,6 +245,17 @@ final class AppSettings {
             withMutation(keyPath: \.transcriptionModel) {
                 _transcriptionModel = newValue
                 defaults.set(newValue.rawValue, forKey: "transcriptionModel")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _whisperLocalModelPath: String
+    var whisperLocalModelPath: String {
+        get { access(keyPath: \.whisperLocalModelPath); return _whisperLocalModelPath }
+        set {
+            withMutation(keyPath: \.whisperLocalModelPath) {
+                _whisperLocalModelPath = newValue
+                defaults.set(newValue, forKey: "whisperLocalModelPath")
             }
         }
     }
@@ -451,6 +473,19 @@ final class AppSettings {
         }
     }
 
+    /// When true, sessions only record audio without live transcription.
+    /// The user can transcribe the recording later from the Notes view.
+    @ObservationIgnored nonisolated(unsafe) private var _recordOnly: Bool
+    var recordOnly: Bool {
+        get { access(keyPath: \.recordOnly); return _recordOnly }
+        set {
+            withMutation(keyPath: \.recordOnly) {
+                _recordOnly = newValue
+                defaults.set(newValue, forKey: "recordOnly")
+            }
+        }
+    }
+
     /// When true, Apple's voice-processing IO is enabled on the mic input to cancel
     /// speaker echo and reduce double-transcription when using built-in speakers + mic.
     @ObservationIgnored nonisolated(unsafe) private var _enableEchoCancellation: Bool
@@ -586,6 +621,7 @@ final class AppSettings {
         self._transcriptionModel = TranscriptionModel(
             rawValue: defaults.string(forKey: "transcriptionModel") ?? ""
         ) ?? .parakeetV2
+        self._whisperLocalModelPath = defaults.string(forKey: "whisperLocalModelPath") ?? ""
         self._inputDeviceID = AudioDeviceID(defaults.integer(forKey: "inputDeviceID"))
         self._openRouterApiKey = secretStore.load(key: "openRouterApiKey") ?? ""
         self._voyageApiKey = secretStore.load(key: "voyageApiKey") ?? ""
@@ -604,6 +640,7 @@ final class AppSettings {
         self._openAIEmbedModel = defaults.string(forKey: "openAIEmbedModel") ?? "text-embedding-3-small"
         self._hasAcknowledgedRecordingConsent = defaults.bool(forKey: "hasAcknowledgedRecordingConsent")
         self._saveAudioRecording = defaults.bool(forKey: "saveAudioRecording")
+        self._recordOnly = defaults.bool(forKey: "recordOnly")
         self._enableTranscriptRefinement = defaults.bool(forKey: "enableTranscriptRefinement")
 
         // Echo cancellation — default to enabled
@@ -864,6 +901,7 @@ final class AppSettings {
         case .ollama: raw = ollamaLLMModel
         case .mlx: raw = mlxModel
         case .openAICompatible: raw = openAILLMModel
+        case .claudeCLI: raw = "Claude CLI"
         }
         return raw.split(separator: "/").last.map(String.init) ?? raw
     }

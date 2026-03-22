@@ -1,8 +1,10 @@
 import Foundation
 
 /// Streaming OpenAI-compatible client for OpenRouter API (and Ollama via OpenAI-compatible endpoint).
+/// When `useClaudeCLI` is true, delegates to the Claude Code CLI instead of making HTTP requests.
 actor OpenRouterClient {
     private static let defaultBaseURL = URL(string: "https://openrouter.ai/api/v1/chat/completions")!
+    private let claudeClient = ClaudeCliClient()
 
     struct Message: Codable, Sendable {
         let role: String
@@ -17,6 +19,7 @@ actor OpenRouterClient {
     }
 
     /// Streams the completion response, yielding text chunks.
+    /// Pass `model: "claude-cli"` to route through the Claude Code CLI instead of HTTP.
     func streamCompletion(
         apiKey: String? = nil,
         model: String,
@@ -24,7 +27,23 @@ actor OpenRouterClient {
         maxTokens: Int = 1024,
         baseURL: URL? = nil
     ) -> AsyncThrowingStream<String, Error> {
-        AsyncThrowingStream { continuation in
+        if model == "claude-cli" {
+            let mappedMessages = messages.map { ClaudeCliClient.Message(role: $0.role, content: $0.content) }
+            let client = claudeClient
+            return AsyncThrowingStream { continuation in
+                Task {
+                    do {
+                        let result = try await client.complete(messages: mappedMessages, maxTokens: maxTokens)
+                        continuation.yield(result)
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+            }
+        }
+
+        return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
                     let request = ChatRequest(
@@ -80,6 +99,7 @@ actor OpenRouterClient {
     }
 
     /// Non-streaming completion for structured JSON tasks (gate decisions, state updates).
+    /// Pass `model: "claude-cli"` to route through the Claude Code CLI instead of HTTP.
     func complete(
         apiKey: String? = nil,
         model: String,
@@ -87,6 +107,13 @@ actor OpenRouterClient {
         maxTokens: Int = 512,
         baseURL: URL? = nil
     ) async throws -> String {
+        if model == "claude-cli" {
+            return try await claudeClient.complete(
+                messages: messages.map { ClaudeCliClient.Message(role: $0.role, content: $0.content) },
+                maxTokens: maxTokens
+            )
+        }
+
         let request = ChatRequest(
             model: model,
             messages: messages,

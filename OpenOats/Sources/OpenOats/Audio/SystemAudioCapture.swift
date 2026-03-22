@@ -25,6 +25,8 @@ final class SystemAudioCapture: @unchecked Sendable {
     )
 
     var audioLevel: Float { _audioLevel.value }
+    /// Expose the thread-safe audio level object for echo gating.
+    var audioLevelRef: AudioLevel { _audioLevel }
 
     struct CaptureStreams {
         let systemAudio: AsyncStream<AVAudioPCMBuffer>

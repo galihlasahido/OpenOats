@@ -92,6 +92,10 @@ final class NotesEngine {
             }
             baseURL = openAIURL
             model = settings.openAILLMModel
+        case .claudeCLI:
+            apiKey = nil
+            baseURL = nil
+            model = "claude-cli"
         }
 
         let transcriptText = formatTranscript(transcript)

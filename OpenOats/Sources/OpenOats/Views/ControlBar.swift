@@ -8,6 +8,7 @@ struct ControlBar: View {
     let statusMessage: String?
     let errorMessage: String?
     let needsDownload: Bool
+    let recordOnly: Bool
     let onToggle: () -> Void
     let onConfirmDownload: () -> Void
 
@@ -60,14 +61,14 @@ struct ControlBar: View {
                 Button(action: onToggle) {
                     HStack(spacing: 6) {
                         if isRunning {
-                            // Pulsing dot when live
+                            // Pulsing dot when live/recording
                             Circle()
-                                .fill(Color.green)
+                                .fill(recordOnly ? Color.red : Color.green)
                                 .frame(width: 8, height: 8)
                                 .scaleEffect(1.0 + CGFloat(audioLevel) * 0.5)
                                 .animation(.easeOut(duration: 0.1), value: audioLevel)
 
-                            Text("Live")
+                            Text(recordOnly ? "Recording" : "Live")
                                 .font(.system(size: 12, weight: .medium))
                                 .foregroundStyle(.primary)
                         } else {

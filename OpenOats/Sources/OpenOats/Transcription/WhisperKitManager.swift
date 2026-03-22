@@ -22,35 +22,54 @@ final class WhisperKitManager: @unchecked Sendable {
         }
     }
 
-    private let variant: Variant
+    private let variant: Variant?
+    private let localModelFolder: String?
     private var pipe: WhisperKit?
     private let log = Logger(subsystem: "com.openoats", category: "WhisperKitManager")
 
     init(variant: Variant) {
         self.variant = variant
+        self.localModelFolder = nil
+    }
+
+    /// Initialize with a local model folder path (skips download).
+    init(localModelFolder: String) {
+        self.variant = nil
+        self.localModelFolder = localModelFolder
     }
 
     /// Download and initialize the WhisperKit pipeline.
     func setup(progressCallback: ((Progress) -> Void)? = nil) async throws {
-        let config = WhisperKitConfig(
-            model: variant.rawValue,
-            modelRepo: Variant.modelRepo,
-            verbose: false,
-            prewarm: true
-        )
+        let config: WhisperKitConfig
+        if let localModelFolder {
+            config = WhisperKitConfig(
+                modelFolder: localModelFolder,
+                verbose: false,
+                prewarm: true
+            )
+        } else if let variant {
+            config = WhisperKitConfig(
+                model: variant.rawValue,
+                modelRepo: Variant.modelRepo,
+                verbose: false,
+                prewarm: true
+            )
+        } else {
+            throw WhisperKitManagerError.notInitialized
+        }
         let whisperKit = try await WhisperKit(config)
         self.pipe = whisperKit
     }
 
     /// Transcribe a segment of 16kHz mono Float32 audio samples.
     /// Returns the transcribed text (empty string if nothing recognized).
-    func transcribe(_ samples: [Float]) async throws -> String {
+    /// - Parameter language: Optional Whisper language code (e.g. "id", "en", "ja"). Nil for auto-detect.
+    func transcribe(_ samples: [Float], language: String? = nil) async throws -> String {
         guard let pipe else {
             throw WhisperKitManagerError.notInitialized
         }
         let options = DecodingOptions(
-            // Let Whisper auto-detect the language
-            language: nil,
+            language: language,
             wordTimestamps: false
         )
         let results = try await pipe.transcribe(audioArray: samples, decodeOptions: options)

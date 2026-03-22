@@ -13,10 +13,16 @@ final class MicCapture: @unchecked Sendable {
     private let _hasCapturedFrames = SyncBool()
     private let _error = SyncString()
     private let _streamContinuation = OSAllocatedUnfairLock<AsyncStream<AVAudioPCMBuffer>.Continuation?>(uncheckedState: nil)
+    private var configChangeObserver: Any?
+    /// Called when the audio hardware configuration changes (e.g. a call app changes sample rate).
+    var onConfigurationChange: (() -> Void)?
 
     var audioLevel: Float { _audioLevel.value }
     var hasCapturedFrames: Bool { _hasCapturedFrames.value }
     var captureError: String? { _error.value }
+
+    /// Reset the captured-frames flag so the health monitor can detect new silence.
+    func resetHasCapturedFrames() { _hasCapturedFrames.value = false }
 
     /// Set a specific input device by its AudioDeviceID. Pass nil to use system default.
     func setInputDevice(_ deviceID: AudioDeviceID?) {
@@ -115,17 +121,28 @@ final class MicCapture: @unchecked Sendable {
             }
 
             // Try multiple tap formats — some devices report formats that don't
-            // round-trip through AVAudioFormat(standardFormat:). Fall back to the
-            // native input format as a last resort.
+            // round-trip through AVAudioFormat(standardFormat:). When a call app
+            // (WhatsApp, Zoom) reconfigures the audio hardware, the mic may report
+            // unusual channel counts (e.g. 3ch). Always prefer mono to avoid
+            // distortion from non-standard multi-channel formats.
             let tapFormat: AVAudioFormat
-            if let f = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: format.channelCount) {
+            if format.channelCount > 2,
+               let f = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1) {
+                // Call apps can cause 3+ channel formats — force mono
+                diagLog("[MIC-4] unusual channel count \(format.channelCount), forcing mono")
+                tapFormat = f
+            } else if let f = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: format.channelCount) {
+                tapFormat = f
+            } else if let f = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1) {
+                // Multi-channel standard format failed — try mono
+                diagLog("[MIC-4] multi-channel format failed, falling back to mono")
                 tapFormat = f
             } else if sampleRate != format.sampleRate,
-                      let f = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: format.channelCount) {
-                diagLog("[MIC-4] hardware-rate format failed, using node rate \(format.sampleRate)")
+                      let f = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: 1) {
+                diagLog("[MIC-4] hardware-rate format failed, using node rate \(format.sampleRate) mono")
                 tapFormat = f
             } else {
-                diagLog("[MIC-4] standard formats failed, using native input format")
+                diagLog("[MIC-4] all standard formats failed, using native input format")
                 tapFormat = format
             }
 
@@ -158,6 +175,16 @@ final class MicCapture: @unchecked Sendable {
                 diagLog("[MIC-7] engine prepared, starting...")
                 try engine.start()
                 diagLog("[MIC-8] engine started successfully, isRunning=\(engine.isRunning)")
+
+                // Listen for audio hardware reconfiguration (e.g. call app changes sample rate)
+                self.configChangeObserver = NotificationCenter.default.addObserver(
+                    forName: .AVAudioEngineConfigurationChange,
+                    object: engine,
+                    queue: .main
+                ) { [weak self] _ in
+                    diagLog("[MIC-CONFIG] audio engine configuration changed, requesting restart")
+                    self?.onConfigurationChange?()
+                }
             } catch {
                 let msg = "Mic failed: \(error.localizedDescription)"
                 print("[MIC-8-FAIL] \(msg)")
@@ -176,6 +203,10 @@ final class MicCapture: @unchecked Sendable {
 
     func stop() {
         finishStream()
+        if let observer = configChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+            configChangeObserver = nil
+        }
         if hasTapInstalled {
             engine.inputNode.removeTap(onBus: 0)
             hasTapInstalled = false

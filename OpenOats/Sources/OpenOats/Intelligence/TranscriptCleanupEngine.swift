@@ -95,6 +95,10 @@ final class TranscriptCleanupEngine {
             }
             baseURL = openAIURL
             model = settings.openAILLMModel
+        case .claudeCLI:
+            apiKey = nil
+            baseURL = nil
+            model = "claude-cli"
         }
 
         let chunks = Self.chunkRecords(records)

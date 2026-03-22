@@ -8,7 +8,7 @@ final class AppSettingsTests: XCTestCase {
 
     func testLLMProviderAllCases() {
         let cases = LLMProvider.allCases
-        XCTAssertEqual(cases.count, 4)
+        XCTAssertEqual(cases.count, 5)
         XCTAssertTrue(cases.contains(.openRouter))
         XCTAssertTrue(cases.contains(.ollama))
         XCTAssertTrue(cases.contains(.openAICompatible))
@@ -45,7 +45,7 @@ final class AppSettingsTests: XCTestCase {
 
     func testTranscriptionModelAllCases() {
         let cases = TranscriptionModel.allCases
-        XCTAssertEqual(cases.count, 5)
+        XCTAssertEqual(cases.count, 6)
     }
 
     func testTranscriptionModelDisplayNames() {

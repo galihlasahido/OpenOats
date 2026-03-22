@@ -215,8 +215,84 @@ final class AudioRecorder: @unchecked Sendable {
         let sysPeak = sysSamples.reduce(Float(0)) { max($0, abs($1)) }
         diagLog("[RECORDER] after readAllMono: micSamples=\(micSamples.count) micPeak=\(micPeak) sysSamples=\(sysSamples.count) sysPeak=\(sysPeak)")
 
-        let length = max(micSamples.count, sysSamples.count)
+        // During voice calls, the system audio process tap can deliver frames at 2x
+        // rate. Detect this and downsample system audio to align with mic (real-time).
+        var alignedSysSamples = sysSamples
+        if !micSamples.isEmpty && !sysSamples.isEmpty {
+            let sysToMicRatio = Double(sysSamples.count) / Double(micSamples.count)
+            if sysToMicRatio > 1.5 {
+                // System audio is significantly longer — downsample to match mic length
+                let factor = Int(round(sysToMicRatio))
+                diagLog("[RECORDER] system audio is \(String(format: "%.1f", sysToMicRatio))x longer than mic, downsampling by \(factor)x")
+                var downsampled = [Float]()
+                downsampled.reserveCapacity(sysSamples.count / factor)
+                for i in stride(from: 0, to: sysSamples.count - factor + 1, by: factor) {
+                    // Average adjacent samples for smoother downsampling
+                    var sum: Float = 0
+                    for j in 0..<factor { sum += sysSamples[i + j] }
+                    downsampled.append(sum / Float(factor))
+                }
+                alignedSysSamples = downsampled
+                diagLog("[RECORDER] downsampled system audio: \(sysSamples.count) → \(alignedSysSamples.count) samples")
+            }
+        }
+
+        let sysPeakAligned = alignedSysSamples.isEmpty ? sysPeak : alignedSysSamples.reduce(Float(0)) { max($0, abs($1)) }
+
+        // Use the shorter stream's length to keep audio aligned.
+        let length: Int
+        if micSamples.isEmpty {
+            length = alignedSysSamples.count
+        } else if alignedSysSamples.isEmpty {
+            length = micSamples.count
+        } else {
+            length = min(micSamples.count, alignedSysSamples.count)
+        }
         guard length > 0 else { return }
+        diagLog("[RECORDER] merge length=\(length) (\(String(format: "%.1f", Double(length) / targetRate))s)")
+
+        // During voice calls, the mic picks up echo (system audio from speakers).
+        // Now that system audio is time-aligned (after downsampling), we can subtract
+        // the echo from the mic, then boost the remaining signal (your actual voice).
+        let isCallMode = sysPeakAligned > 0.001 && micPeak > 0.001 && (sysPeakAligned / micPeak) > 3.0
+        var cleanedMic = micSamples
+        var micGain: Float = 1.0
+
+        if isCallMode {
+            let ratio = sysPeakAligned / micPeak
+            diagLog("[RECORDER] call mode: mic is \(String(format: "%.0f", ratio))x quieter, applying echo subtraction + gain")
+
+            // Estimate echo level: how much of the system audio leaks into the mic.
+            // Compute cross-correlation to find the best scaling factor.
+            var echoScale: Float = 0
+            if length > 0 {
+                var dotProduct: Float = 0
+                var sysEnergy: Float = 0
+                let sampleLimit = min(length, micSamples.count, alignedSysSamples.count)
+                for i in 0..<sampleLimit {
+                    dotProduct += micSamples[i] * alignedSysSamples[i]
+                    sysEnergy += alignedSysSamples[i] * alignedSysSamples[i]
+                }
+                if sysEnergy > 0 {
+                    echoScale = max(0, dotProduct / sysEnergy)
+                }
+            }
+            diagLog("[RECORDER] echo scale factor: \(echoScale)")
+
+            // Subtract scaled echo from mic
+            let limit = min(cleanedMic.count, alignedSysSamples.count)
+            for i in 0..<limit {
+                cleanedMic[i] = micSamples[i] - echoScale * alignedSysSamples[i]
+            }
+
+            // Compute cleaned mic peak and apply gain
+            let cleanedPeak = cleanedMic.prefix(length).reduce(Float(0)) { max($0, abs($1)) }
+            if cleanedPeak > 0.001 {
+                // Boost to ~0.5 peak (reasonable voice level)
+                micGain = min(0.5 / cleanedPeak, 15.0)
+                diagLog("[RECORDER] cleaned mic peak=\(cleanedPeak), gain=\(micGain)x")
+            }
+        }
 
         let outputURL = dir.appendingPathComponent("\(timestamp).m4a")
         guard let outputFile = try? AVAudioFile(
@@ -244,8 +320,9 @@ final class AudioRecorder: @unchecked Sendable {
             buffer.frameLength = AVAudioFrameCount(count)
 
             for i in 0..<count {
-                let m: Float = offset + i < micSamples.count ? micSamples[offset + i] : 0
-                let s: Float = offset + i < sysSamples.count ? sysSamples[offset + i] : 0
+                let idx = offset + i
+                let m: Float = idx < cleanedMic.count ? cleanedMic[idx] * micGain : 0
+                let s: Float = idx < alignedSysSamples.count ? alignedSysSamples[idx] : 0
                 out[i] = max(-1, min(1, m + s))
             }
 

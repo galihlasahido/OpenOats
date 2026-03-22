@@ -123,6 +123,7 @@ final class TranscriptionEngine {
     private var sysRestartTask: Task<Void, Never>?
     private var pendingMicDeviceID: AudioDeviceID?
     private var pendingSystemAudioRestart = false
+    private var micHealthTask: Task<Void, Never>?
 
     init(transcriptStore: TranscriptStore, settings: AppSettings, mode: Mode = .live) {
         self.transcriptStore = transcriptStore
@@ -130,7 +131,7 @@ final class TranscriptionEngine {
         self.mode = mode
         switch mode {
         case .live:
-            self.needsModelDownload = Self.modelNeedsDownload(settings.transcriptionModel)
+            self.needsModelDownload = Self.modelNeedsDownload(settings.transcriptionModel, localModelPath: settings.whisperLocalModelPath)
         case .scripted:
             self.needsModelDownload = false
         }
@@ -139,9 +140,94 @@ final class TranscriptionEngine {
     func refreshModelAvailability() {
         switch mode {
         case .live:
-            needsModelDownload = Self.modelNeedsDownload(settings.transcriptionModel)
+            needsModelDownload = Self.modelNeedsDownload(settings.transcriptionModel, localModelPath: settings.whisperLocalModelPath)
         case .scripted:
             needsModelDownload = false
+        }
+    }
+
+    /// Start audio capture only (no transcription model loading).
+    /// Used when "Record only" mode is enabled — captures mic + system audio
+    /// for the audio recorder and audio level meter.
+    /// Whether the engine is in record-only mode (no transcription backends loaded).
+    private var isRecordOnlyMode = false
+
+    func startRecordOnly(inputDeviceID: AudioDeviceID = 0) async {
+        diagLog("[ENGINE-0] startRecordOnly() called")
+        guard !isRunning else { return }
+        lastError = nil
+        isRunning = true
+        isRecordOnlyMode = true
+        assetStatus = "Recording"
+
+        guard await ensureMicrophonePermission() else { return }
+
+        userSelectedDeviceID = inputDeviceID
+        guard let targetMicID = resolvedMicDeviceID(for: inputDeviceID) else {
+            let msg = unavailableMicMessage(for: inputDeviceID)
+            diagLog("[ENGINE-REC-FAIL] \(msg)")
+            lastError = msg
+            isRunning = false
+            assetStatus = "Ready"
+            return
+        }
+        currentMicDeviceID = targetMicID
+
+        startRecordOnlyMicStream(deviceID: targetMicID)
+
+        // Start system audio capture
+        do {
+            let sysStreams = try await systemCapture.bufferStream()
+            var sysStream = sysStreams.systemAudio
+            if let recorder = audioRecorder {
+                sysStream = Self.tappedStream(sysStream) { buffer in
+                    recorder.writeSysBuffer(buffer)
+                }
+            }
+            sysTask = Task.detached {
+                for await _ in sysStream {}
+            }
+        } catch {
+            diagLog("[ENGINE-REC] system audio capture failed: \(error.localizedDescription)")
+        }
+
+        installDefaultDeviceListener()
+        installDefaultOutputDeviceListener()
+        diagLog("[ENGINE-REC] record-only mode started")
+    }
+
+    /// Start (or restart) the mic stream for record-only mode.
+    /// Handles audio recorder tapping and config change detection with debounce.
+    private func startRecordOnlyMicStream(deviceID: AudioDeviceID) {
+        let startTime = Date()
+
+        micCapture.onConfigurationChange = { [weak self] in
+            guard let self, self.isRunning, self.isRecordOnlyMode else { return }
+            // Debounce: ignore config changes within 2 seconds of start
+            // (the engine always fires one on initial setup)
+            guard Date().timeIntervalSince(startTime) > 2.0 else {
+                diagLog("[ENGINE-CONFIG] ignoring early config change (debounced)")
+                return
+            }
+            diagLog("[ENGINE-CONFIG] mic config changed during record-only, restarting mic")
+            Task { @MainActor [weak self] in
+                guard let self, self.isRunning else { return }
+                self.micCapture.finishStream()
+                await self.micTask?.value
+                self.micTask = nil
+                self.micCapture.stop()
+                self.startRecordOnlyMicStream(deviceID: deviceID)
+            }
+        }
+
+        var micStream = micCapture.bufferStream(deviceID: deviceID)
+        if let recorder = audioRecorder {
+            micStream = Self.tappedStream(micStream) { buffer in
+                recorder.writeMicBuffer(buffer)
+            }
+        }
+        micTask = Task.detached {
+            for await _ in micStream {}
         }
     }
 
@@ -190,7 +276,8 @@ final class TranscriptionEngine {
         diagLog("[ENGINE-1] loading transcription model \(transcriptionModel.rawValue)...")
         do {
             let vocab = settings.transcriptionCustomVocabulary
-            let mic = transcriptionModel.makeBackend(customVocabulary: vocab)
+            let localPath = settings.whisperLocalModelPath
+            let mic = transcriptionModel.makeBackend(customVocabulary: vocab, localModelPath: localPath)
             try await mic.prepare { [weak self] status in
                 Task { @MainActor in
                     self?.assetStatus = status
@@ -203,7 +290,7 @@ final class TranscriptionEngine {
             if transcriptionModel == .qwen3ASR06B {
                 self.systemBackend = mic
             } else {
-                let sys = transcriptionModel.makeBackend(customVocabulary: vocab)
+                let sys = transcriptionModel.makeBackend(customVocabulary: vocab, localModelPath: localPath)
                 try await sys.prepare { _ in }
                 self.systemBackend = sys
             }
@@ -224,7 +311,7 @@ final class TranscriptionEngine {
             assetStatus = "Ready"
             isRunning = false
             // Clear corrupt cache so the next attempt triggers a fresh download
-            settings.transcriptionModel.makeBackend().clearModelCache()
+            settings.transcriptionModel.makeBackend(localModelPath: settings.whisperLocalModelPath).clearModelCache()
             diagLog("[ENGINE-2-FAIL] cleared model cache for \(settings.transcriptionModel.rawValue)")
             needsModelDownload = true
             downloadConfirmed = false
@@ -301,6 +388,10 @@ final class TranscriptionEngine {
         // Install CoreAudio listeners for live device routing changes
         installDefaultDeviceListener()
         installDefaultOutputDeviceListener()
+
+        // 4. Start mic health monitor — detects when a voice call app steals the
+        // audio device and the engine silently stops delivering buffers.
+        startMicHealthMonitor(locale: locale)
     }
 
     /// Restart only the mic capture with a new device, keeping system audio and models intact.
@@ -452,6 +543,7 @@ final class TranscriptionEngine {
         pendingMicDeviceID = nil
         pendingSystemAudioRestart = false
         micKeepAliveTask?.cancel()
+        micHealthTask?.cancel()
 
         micCapture.finishStream()
         systemCapture.finishStream()
@@ -466,9 +558,11 @@ final class TranscriptionEngine {
         sysTask = nil
         pendingMicDeviceID = nil
         micKeepAliveTask = nil
+        micHealthTask = nil
         currentMicDeviceID = 0
         micBackend = nil
         systemBackend = nil
+        isRecordOnlyMode = false
         isRunning = false
         assetStatus = "Ready"
     }
@@ -493,14 +587,17 @@ final class TranscriptionEngine {
         micTask?.cancel()
         sysTask?.cancel()
         micKeepAliveTask?.cancel()
+        micHealthTask?.cancel()
         micTask = nil
         sysTask = nil
         micKeepAliveTask = nil
+        micHealthTask = nil
         Task { await systemCapture.stop() }
         micCapture.stop()
         currentMicDeviceID = 0
         micBackend = nil
         systemBackend = nil
+        isRecordOnlyMode = false
         isRunning = false
         assetStatus = "Ready"
     }
@@ -517,12 +614,7 @@ final class TranscriptionEngine {
             return
         }
 
-        guard targetMicID != currentMicDeviceID else {
-            diagLog("[ENGINE-MIC-SWAP] same device \(targetMicID), skipping")
-            return
-        }
-
-        diagLog("[ENGINE-MIC-SWAP] switching mic from \(currentMicDeviceID) to \(targetMicID)")
+        diagLog("[ENGINE-MIC-SWAP] restarting mic on device \(targetMicID) (was \(currentMicDeviceID))")
 
         micCapture.finishStream()
         await micTask?.value
@@ -583,12 +675,69 @@ final class TranscriptionEngine {
         diagLog("[ENGINE-SYS-SWAP] system audio stream restarted")
     }
 
+    /// Periodically checks if the mic engine is still delivering audio buffers.
+    /// If no new frames arrive for 10 seconds while recording, the mic is restarted.
+    /// This handles voice call apps (Zoom, Teams, etc.) stealing the audio device.
+    private func startMicHealthMonitor(locale: Locale) {
+        micHealthTask?.cancel()
+        micHealthTask = Task { @MainActor [weak self] in
+            // Wait for initial startup to settle
+            try? await Task.sleep(for: .seconds(10))
+
+            var lastHadFrames = true
+            while !Task.isCancelled {
+                guard let self, self.isRunning else { return }
+
+                let hasFrames = self.micCapture.hasCapturedFrames
+                if lastHadFrames && !hasFrames {
+                    // First time we notice no frames — wait one more cycle to confirm
+                    diagLog("[ENGINE-HEALTH-MON] mic stopped producing audio, will retry in 10s")
+                } else if !lastHadFrames && !hasFrames {
+                    // Confirmed: mic has been silent for ~20 seconds, restart it
+                    diagLog("[ENGINE-HEALTH-MON] mic confirmed dead, restarting...")
+                    self.micCapture.finishStream()
+                    await self.micTask?.value
+                    self.micTask = nil
+                    self.micCapture.stop()
+
+                    guard let vadManager = self.vadManager else { return }
+                    let deviceID = self.currentMicDeviceID
+                    self.startMicStream(
+                        locale: locale,
+                        vadManager: vadManager,
+                        deviceID: deviceID
+                    )
+                    diagLog("[ENGINE-HEALTH-MON] mic restarted on device \(deviceID)")
+                }
+
+                lastHadFrames = hasFrames
+                // Reset the flag so next check can detect new silence
+                self.micCapture.resetHasCapturedFrames()
+
+                try? await Task.sleep(for: .seconds(10))
+            }
+        }
+    }
+
     private func startMicStream(
         locale: Locale,
         vadManager: VadManager,
         deviceID: AudioDeviceID,
         echoCancellation: Bool = false
     ) {
+        // Restart mic when audio hardware reconfigures (e.g. call app changes sample rate)
+        let micStartTime = Date()
+        micCapture.onConfigurationChange = { [weak self] in
+            guard let self, self.isRunning, !self.isRecordOnlyMode else { return }
+            // Debounce: ignore config changes within 2 seconds of start
+            guard Date().timeIntervalSince(micStartTime) > 2.0 else {
+                diagLog("[ENGINE-CONFIG] ignoring early config change (debounced)")
+                return
+            }
+            diagLog("[ENGINE-CONFIG] mic config changed, restarting mic on device \(deviceID)")
+            self.restartMic(inputDeviceID: deviceID)
+        }
+
         var micStream = micCapture.bufferStream(deviceID: deviceID, echoCancellation: echoCancellation)
         if let recorder = audioRecorder {
             micStream = Self.tappedStream(micStream) { buffer in
@@ -600,6 +749,7 @@ final class TranscriptionEngine {
             locale: locale,
             speaker: .you,
             vadManager: vadManager,
+            echoGateLevel: systemCapture.audioLevelRef,
             onPartial: { text in
                 Task { @MainActor in store.volatileYouText = text }
             },
@@ -673,6 +823,7 @@ final class TranscriptionEngine {
         locale: Locale,
         speaker: Speaker,
         vadManager: VadManager,
+        echoGateLevel: AudioLevel? = nil,
         onPartial: @escaping @Sendable (String) -> Void,
         onFinal: @escaping @Sendable (String) -> Void
     ) -> StreamingTranscriber? {
@@ -686,6 +837,7 @@ final class TranscriptionEngine {
             locale: locale,
             vadManager: vadManager,
             speaker: speaker,
+            echoGateLevel: echoGateLevel,
             onPartial: onPartial,
             onFinal: onFinal
         )
@@ -708,8 +860,8 @@ final class TranscriptionEngine {
         return "No default microphone is currently available."
     }
 
-    private static func modelNeedsDownload(_ model: TranscriptionModel) -> Bool {
-        let backend = model.makeBackend()
+    private static func modelNeedsDownload(_ model: TranscriptionModel, localModelPath: String = "") -> Bool {
+        let backend = model.makeBackend(localModelPath: localModelPath)
         if case .needsDownload = backend.checkStatus() {
             return true
         }

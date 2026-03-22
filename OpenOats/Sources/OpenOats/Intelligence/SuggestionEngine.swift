@@ -55,18 +55,18 @@ final class SuggestionEngine {
         self.settings = settings
     }
 
-    /// Returns the API key for the current LLM provider (nil for Ollama).
+    /// Returns the API key for the current LLM provider (nil for Ollama/Claude CLI).
     private var llmApiKey: String? {
         switch settings.llmProvider {
         case .openRouter: settings.openRouterApiKey
         case .ollama: nil
         case .mlx: nil
         case .openAICompatible: settings.openAILLMApiKey.isEmpty ? nil : settings.openAILLMApiKey
+        case .claudeCLI: nil
         }
     }
 
     /// Returns the base URL for the current LLM provider (nil uses the default OpenRouter URL).
-    /// Throws a fatal error for Ollama if the URL is invalid, preventing silent fallback to OpenRouter.
     private var llmBaseURL: URL? {
         switch settings.llmProvider {
         case .openRouter: return nil
@@ -91,6 +91,7 @@ final class SuggestionEngine {
                 return nil
             }
             return url
+        case .claudeCLI: return nil
         }
     }
 
@@ -101,6 +102,7 @@ final class SuggestionEngine {
         case .ollama: settings.ollamaLLMModel
         case .mlx: settings.mlxModel
         case .openAICompatible: settings.openAILLMModel
+        case .claudeCLI: "claude-cli"
         }
     }
 
@@ -122,6 +124,8 @@ final class SuggestionEngine {
             guard llmBaseURL != nil else { return }
         case .openAICompatible:
             guard llmBaseURL != nil else { return }
+        case .claudeCLI:
+            break // No credentials needed
         }
 
         currentTask = Task {

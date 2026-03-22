@@ -221,19 +221,22 @@ final class AppCoordinator {
         await sessionStore.startSession(templateID: templateID)
         await transcriptLogger?.startSession()
 
-        if let settings {
-            if settings.saveAudioRecording {
-                audioRecorder?.startSession()
-                transcriptionEngine?.audioRecorder = audioRecorder
-            } else {
-                transcriptionEngine?.audioRecorder = nil
-            }
+        // Always record audio so recordings are available for export/review
+        audioRecorder?.startSession()
+        transcriptionEngine?.audioRecorder = audioRecorder
 
-            await transcriptionEngine?.start(
-                locale: settings.locale,
-                inputDeviceID: settings.inputDeviceID,
-                transcriptionModel: settings.transcriptionModel
-            )
+        if let settings {
+            if settings.recordOnly {
+                await transcriptionEngine?.startRecordOnly(
+                    inputDeviceID: settings.inputDeviceID
+                )
+            } else {
+                await transcriptionEngine?.start(
+                    locale: settings.locale,
+                    inputDeviceID: settings.inputDeviceID,
+                    transcriptionModel: settings.transcriptionModel
+                )
+            }
         }
 
         // Start silence monitoring for auto-detected sessions
@@ -313,9 +316,7 @@ final class AppCoordinator {
         await transcriptLogger?.endSession()
 
         // 6b. Merge and encode audio recording (after all audio drained)
-        if let settings, settings.saveAudioRecording {
-            await audioRecorder?.finalizeRecording()
-        }
+        await audioRecorder?.finalizeRecording()
 
         // 7. Update UI state + refresh history so Notes window sees the new session
         lastEndedSession = index
@@ -333,6 +334,83 @@ final class AppCoordinator {
     /// Load session history from sidecars (lightweight index only).
     func loadHistory() async {
         sessionHistory = await sessionStore.loadSessionIndex()
+    }
+
+    // MARK: - Audio Import
+
+    @ObservationIgnored nonisolated(unsafe) private var _importProgress: String?
+    var importProgress: String? {
+        get { access(keyPath: \.importProgress); return _importProgress }
+        set { withMutation(keyPath: \.importProgress) { _importProgress = newValue } }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _isImporting = false
+    var isImporting: Bool {
+        get { access(keyPath: \.isImporting); return _isImporting }
+        set { withMutation(keyPath: \.isImporting) { _isImporting = newValue } }
+    }
+
+    /// Import an audio file, transcribe it offline, and create a new session.
+    /// Returns the session ID of the newly created session.
+    @discardableResult
+    func importAudioFile(url: URL, settings: AppSettings) async -> String? {
+        guard !isImporting else { return nil }
+        isImporting = true
+        importProgress = "Preparing models..."
+
+        let model = settings.transcriptionModel
+        let vocab = settings.transcriptionCustomVocabulary
+        let localPath = settings.whisperLocalModelPath
+        let locale = settings.locale
+
+        do {
+            let backend = model.makeBackend(customVocabulary: vocab, localModelPath: localPath)
+            importProgress = "Loading \(model.displayName)..."
+            try await backend.prepare { [weak self] status in
+                Task { @MainActor in self?.importProgress = status }
+            }
+
+            let transcriber = AudioFileTranscriber(backend: backend, locale: locale)
+            let result = try await transcriber.transcribe(url: url) { [weak self] done, total in
+                Task { @MainActor in
+                    self?.importProgress = "Transcribing \(done)/\(total) segments..."
+                }
+            }
+
+            guard !result.records.isEmpty else {
+                importProgress = nil
+                isImporting = false
+                lastStorageError = "No speech was detected in the audio file."
+                return nil
+            }
+
+            // Create session
+            let filename = url.deletingPathExtension().lastPathComponent
+            let fmt = DateFormatter()
+            fmt.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+            let sessionID = "session_\(fmt.string(from: Date()))"
+            let startedAt = result.records.first?.timestamp ?? Date()
+            let endedAt = result.records.last?.timestamp ?? Date()
+
+            await sessionStore.seedSession(
+                id: sessionID,
+                records: result.records,
+                startedAt: startedAt,
+                endedAt: endedAt,
+                title: filename
+            )
+
+            await loadHistory()
+            importProgress = nil
+            isImporting = false
+            requestedSessionSelectionID = sessionID
+            return sessionID
+        } catch {
+            importProgress = nil
+            isImporting = false
+            lastStorageError = "Import failed: \(error.localizedDescription)"
+            return nil
+        }
     }
 
     func queueExternalCommand(_ command: ExternalCommand) {

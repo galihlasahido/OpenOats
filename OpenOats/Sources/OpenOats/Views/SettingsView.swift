@@ -106,6 +106,10 @@ struct SettingsView: View {
 
                     TextField("Model", text: $settings.openAILLMModel, prompt: Text("e.g. gpt-4o-mini"))
                         .font(.system(size: 12, design: .monospaced))
+                case .claudeCLI:
+                    Text("Uses the Claude Code CLI (claude -p). No API key needed — uses your existing Claude Code authentication.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -153,6 +157,12 @@ struct SettingsView: View {
             }
 
             Section("Recording") {
+                Toggle("Record only (no live transcription)", isOn: $settings.recordOnly)
+                    .font(.system(size: 12))
+                Text("Only record audio without live transcription. You can transcribe recordings later from Past Meetings.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
                 Toggle("Save audio recording", isOn: $settings.saveAudioRecording)
                     .font(.system(size: 12))
                 Text("Save a local audio file (.m4a) alongside each transcript. Audio never leaves your device.")
@@ -174,6 +184,29 @@ struct SettingsView: View {
                 }
                 .font(.system(size: 12))
                 .accessibilityIdentifier("settings.transcriptionModelPicker")
+
+                if settings.transcriptionModel == .whisperLocal {
+                    HStack {
+                        TextField("Model folder path", text: $settings.whisperLocalModelPath)
+                            .font(.system(size: 12, design: .monospaced))
+                            .textFieldStyle(.roundedBorder)
+                        Button("Browse...") {
+                            let panel = NSOpenPanel()
+                            panel.canChooseFiles = false
+                            panel.canChooseDirectories = true
+                            panel.allowsMultipleSelection = false
+                            panel.message = "Select a folder containing WhisperKit CoreML model files"
+                            if panel.runModal() == .OK, let url = panel.url {
+                                settings.whisperLocalModelPath = url.path
+                            }
+                        }
+                        .font(.system(size: 12))
+                    }
+                    Text("Select a folder containing WhisperKit CoreML model files (.mlmodelc). Note: GGML .bin files are not supported — WhisperKit requires CoreML format models.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
                 if settings.transcriptionModel.supportsExplicitLanguageHint {
                     TextField(
