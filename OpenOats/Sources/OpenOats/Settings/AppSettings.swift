@@ -76,6 +76,7 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
     case qwen3ASR06B
     case whisperBase
     case whisperSmall
+    case whisperLargeV3Turbo
     case whisperLocal
 
     var id: String { rawValue }
@@ -87,6 +88,7 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
         case .qwen3ASR06B: "Qwen3 ASR 0.6B"
         case .whisperBase: "Whisper Base"
         case .whisperSmall: "Whisper Small"
+        case .whisperLargeV3Turbo: "Whisper Large v3 Turbo"
         case .whisperLocal: "Whisper Local Model"
         }
     }
@@ -101,6 +103,8 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
             "Whisper Base requires a one-time model download (~142 MB)."
         case .whisperSmall:
             "Whisper Small requires a one-time model download (~244 MB)."
+        case .whisperLargeV3Turbo:
+            "Whisper Large v3 Turbo requires a one-time model download (~800 MB)."
         case .whisperLocal:
             "Please select a folder containing WhisperKit CoreML model files."
         }
@@ -110,7 +114,7 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
         switch self {
         case .qwen3ASR06B, .whisperLocal:
             true
-        case .parakeetV2, .parakeetV3, .whisperBase, .whisperSmall:
+        case .parakeetV2, .parakeetV3, .whisperBase, .whisperSmall, .whisperLargeV3Turbo:
             false
         }
     }
@@ -121,7 +125,7 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
             "Language Hint"
         case .whisperLocal:
             "Language"
-        case .parakeetV2, .parakeetV3, .whisperBase, .whisperSmall:
+        case .parakeetV2, .parakeetV3, .whisperBase, .whisperSmall, .whisperLargeV3Turbo:
             "Locale"
         }
     }
@@ -134,7 +138,7 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
             "Parakeet TDT v3 auto-detects among its supported languages. Locale changes do not affect this model."
         case .qwen3ASR06B:
             "Optional. Used as a language hint for Qwen3 ASR. Enter a locale such as en-US, fr-FR, or ja-JP. Applies when a new session starts."
-        case .whisperBase, .whisperSmall:
+        case .whisperBase, .whisperSmall, .whisperLargeV3Turbo:
             "Whisper auto-detects the spoken language. Locale changes do not affect this model."
         case .whisperLocal:
             "Optional. Whisper language code (e.g. id, en, ja, fr). Leave empty for auto-detect."
@@ -146,6 +150,7 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
         switch self {
         case .whisperBase: .base
         case .whisperSmall: .small
+        case .whisperLargeV3Turbo: .largeV3Turbo
         default: nil
         }
     }
@@ -157,6 +162,7 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
         case .qwen3ASR06B: return Qwen3Backend()
         case .whisperBase: return WhisperKitBackend(variant: .base)
         case .whisperSmall: return WhisperKitBackend(variant: .small)
+        case .whisperLargeV3Turbo: return WhisperKitBackend(variant: .largeV3Turbo)
         case .whisperLocal: return WhisperKitLocalBackend(modelFolder: localModelPath)
         }
     }
